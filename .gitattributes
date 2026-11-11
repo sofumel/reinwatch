@@ -1,0 +1,2 @@
+# Shell scripts stay LF so they run in bash even on a Windows clone with autocrlf.
+*.sh        text eol=lf

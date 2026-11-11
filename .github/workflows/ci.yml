@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    name: validate and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Pinned: the mod needs Claude Code 2.1.300 or later; bump this when you test on a newer one.
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.318
+
+      # Neither step needs a login. tsc -p . is left to contributors: the engine writes the API types
+      # it needs only when a logged-in session loads the mod.
+      - name: Validate the plugin
+        run: claude plugin validate --strict .
+
+      - name: Run the tests
+        run: claude plugin test .

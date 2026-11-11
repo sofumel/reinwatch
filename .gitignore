@@ -1,0 +1,4 @@
+.claude-plugin/types/
+.claude/
+node_modules/
+*.log

@@ -1,0 +1,15 @@
+{
+  "name": "reinwatch",
+  "owner": { "name": "sofumel" },
+  "description": "Claude Code mods by sofumel.",
+  "plugins": [
+    {
+      "name": "reinwatch",
+      "source": "./",
+      "version": "1.0.0",
+      "description": "A token and runaway watchdog for the subagents, teammates and workflow agents Claude Code runs: per-agent tokens, warnings, notifications and history, with a way to stop one.",
+      "category": "productivity",
+      "tags": ["subagents", "tokens", "monitoring", "watchdog", "warnings", "stop"]
+    }
+  ]
+}
