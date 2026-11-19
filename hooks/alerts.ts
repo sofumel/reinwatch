@@ -7,9 +7,16 @@ import { activeMs, newTokens, type Tracker } from './tracker.ts'
 
 // Returns the alert only the first time its key is seen. The text is one plain line (a tool or run name came from outside);
 // the key is kept as it came.
-function raise(t: Tracker, key: string, kind: AlertKind, agentId: string | undefined, at: number, text: string): Alert[] {
-  if (t.fired[key]) return []
-  t.fired[key] = true
+// With `remember: false` the key is neither checked nor recorded: the caller has its own once-only rule (the burst's
+// `burstActive`), and a key that is new every time would only pile up in `fired`.
+// A muted kind (`s.muted`) is never raised and never remembered.
+function raise(t: Tracker, s: Settings, key: string, kind: AlertKind, agentId: string | undefined, at: number, text: string,
+  opts: { remember?: boolean } = {}): Alert[] {
+  if (s.muted.has(kind)) return []
+  if (opts.remember !== false) {
+    if (t.fired[key]) return []
+    t.fired[key] = true
+  }
   const plain = clean(text)
   return [agentId === undefined ? { key, kind, at, text: plain } : { key, kind, agentId, at, text: plain }]
 }
@@ -17,7 +24,7 @@ function raise(t: Tracker, key: string, kind: AlertKind, agentId: string | undef
 function longAlert(t: Tracker, row: AgentRow, s: Settings, now: number): Alert[] {
   const ms = activeMs(row, now)
   if (ms <= s.activeMs) return []
-  return raise(t, `long:${row.id}`, 'long', row.id, now,
+  return raise(t, s, `long:${row.id}`, 'long', row.id, now,
     `"${label(row)}" has worked ${formatDuration(ms)} (limit ${formatDuration(s.activeMs)})`)
 }
 
@@ -27,15 +34,15 @@ export function checkAgent(t: Tracker, agentId: string, s: Settings, now: number
   const out = longAlert(t, row, s, now)
   const n = newTokens(row.tokens)
   if (n > s.tokenLimit) {
-    out.push(...raise(t, `tokens:${agentId}`, 'tokens', agentId, now,
+    out.push(...raise(t, s, `tokens:${agentId}`, 'tokens', agentId, now,
       `"${label(row)}" has used ${formatTokens(n)} tokens (limit ${formatTokens(s.tokenLimit)})`))
   }
   if (lastCall !== undefined && lastCall.count >= s.repeatCount) {
-    out.push(...raise(t, `repeat:${agentId}`, 'repeat', agentId, now,
-      `"${label(row)}" made the same ${lastCall.tool} call ${lastCall.count} times`))
+    out.push(...raise(t, s, `repeat:${agentId}`, 'repeat', agentId, now,
+      `"${label(row)}" made the same ${lastCall.tool} call ${lastCall.count} times in a row`))
   }
   if (row.failStreak >= s.failStreak) {
-    out.push(...raise(t, `failures:${agentId}`, 'failures', agentId, now,
+    out.push(...raise(t, s, `failures:${agentId}`, 'failures', agentId, now,
       `"${label(row)}" had ${row.failStreak} tool failures in a row`))
   }
   return out
@@ -52,12 +59,12 @@ export function checkSpawn(t: Tracker, runId: string | undefined, s: Settings, n
   if (n < s.burstCount) t.burstActive = false
   else if (!t.burstActive) {
     t.burstActive = true
-    out.push(...raise(t, `burst:${now}`, 'burst', undefined, now, `${n} agents started within ${formatDuration(s.burstWindowMs)}`))
+    out.push(...raise(t, s, `burst:${now}`, 'burst', undefined, now, `${n} agents started within ${formatDuration(s.burstWindowMs)}`, { remember: false }))
   }
   if (runId !== undefined) {
     const started = t.runs[runId] ?? 0
     if (started >= s.burstCount) {
-      out.push(...raise(t, `run:${runId}`, 'run', undefined, now, `Workflow run ${runId} has started ${started} agents`))
+      out.push(...raise(t, s, `run:${runId}`, 'run', undefined, now, `Workflow run ${runId} has started ${started} agents`))
     }
   }
   return out

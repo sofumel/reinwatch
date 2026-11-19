@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { label } from '../hooks/format.ts'
 import { STOP_DENY, STOP_REPLY } from '../hooks/stop.ts'
 import type { Summary } from '../types'
-import { mountPane, readAgents, readAlerts, readState, spawn, standIns, start, stateVersion, step, tool, turn } from './helpers.ts'
+import { mountPane, readAgents, readAlerts, readState, seedStore, spawn, standIns, start, stateVersion, step, tool, turn } from './helpers.ts'
 
 const SEC = 1000
 const MIN = 60_000
@@ -125,7 +125,31 @@ test('a Bash call repeated with a reworded description trips the repeat warning 
   expect((await readAlerts($)).map(a => a.key)).not.toContain('repeat:a1')
   await run('Run the tests once more')
   await clock.advance(SEC)
-  expect((await readAlerts($)).find(a => a.key === 'repeat:a1')?.text).toBe('"Fix tests" made the same Bash call 3 times')
+  expect((await readAlerts($)).find(a => a.key === 'repeat:a1')?.text).toBe('"Fix tests" made the same Bash call 3 times in a row')
+})
+
+test('a different call in between starts the repeat count over', { options: { repeatCount: 3 } }, async ($, on) => {
+  const { clock } = standIns(on)
+  await start($)
+  await spawn($, 'a1')
+  await turn($, 'a1', 'start')
+  await tool($, 'a1', 'npm test')
+  await tool($, 'a1', 'npm test')
+  await tool($, 'a1', 'ls')
+  await tool($, 'a1', 'npm test')
+  await tool($, 'a1', 'npm test')
+  await clock.advance(SEC)
+  expect((await readAlerts($)).map(a => a.key)).not.toContain('repeat:a1')
+  await tool($, 'a1', 'npm test')
+  await clock.advance(SEC)
+  expect((await readAlerts($)).map(a => a.key)).toContain('repeat:a1')
+})
+
+test('the 30-day totals are read even when the command cannot be registered', async ($, on) => {
+  standIns(on, [], { now: Date.UTC(2026, 10, 15, 12), commandFails: true })
+  seedStore('days-v2', [{ day: '2026-11-15', agents: 2, tokens: 3000, activeMs: 4000 }])
+  await start($)
+  expect(((await readState($, 'history')) as { agents: number } | undefined)?.agents).toBe(2)
 })
 
 test('many events in one tick write the agents value once', async ($, on) => {
@@ -314,7 +338,7 @@ test('a notification that takes its time holds up neither the warning nor the st
   await tool($, 'a1', 'ls')
   await clock.advance(SEC)
   // The notification is under way and not yet answered; the warning is already written and counted.
-  expect(seen.notices.map(n => n.text)).toEqual(['"Fix tests" made the same Bash call 2 times'])
+  expect(seen.notices.map(n => n.text)).toEqual(['"Fix tests" made the same Bash call 2 times in a row'])
   expect((await readAlerts($)).map(a => a.key)).toEqual(['repeat:a1'])
   expect(seen.statuses.at(-1)).toBe('agents 1 running · 0 tok · 0s active · 1 warning')
   await clock.advance(60 * SEC)
@@ -601,7 +625,7 @@ test('a notification is one plain line', { options: { repeatCount: 2 } }, async 
   await tool($, 'a1', 'ls')
   await tool($, 'a1', 'ls')
   await clock.advance(SEC)
-  expect(seen.notices.map(n => n.text)).toEqual(['"Fix tests" made the same Bash call 2 times'])
+  expect(seen.notices.map(n => n.text)).toEqual(['"Fix tests" made the same Bash call 2 times in a row'])
 })
 
 test('a stored row that cannot be joined does not make the read-back run again', async ($, on) => {
@@ -634,4 +658,65 @@ test('a very long description, type or model is kept only as far as it can be sh
   const row = (await readAgents($))['a1']
   expect(row?.description).toBe('word '.repeat(40))
   expect([row?.type, row?.model]).toEqual(['y'.repeat(100), 'z'.repeat(100)])
+})
+
+test('a muted kind raises no alert, no notification and no warning in the status line', { options: { mute: 'repeat', repeatCount: 2 } }, async ($, on) => {
+  const { clock, seen } = standIns(on)
+  await start($)
+  await spawn($, 'a1')
+  await turn($, 'a1', 'start')
+  await tool($, 'a1', 'ls')
+  await tool($, 'a1', 'ls')
+  await clock.advance(SEC)
+  expect(await readAlerts($)).toEqual([])
+  expect(seen.notices).toEqual([])
+  expect(seen.statuses.at(-1)).not.toContain('warning')
+})
+
+test('a stored Stop record survives a read-back, and a new one joins it', async ($, on) => {
+  const { clock } = standIns(on)
+  const old = { id: 'old', label: 'Old job', at: 5, tokens: 10, activeMs: 1000, lastTool: 'Read' }
+  on('state.get', (_, e, next) =>
+    e.key === 'stops' && stateVersion('stops') === 0 ? { value: { value: { shape: 'stops-1', value: [old] }, version: 0 } } : next(e))
+  await start($)
+  await clock.advance(SEC)
+  expect(await readState($, 'stops')).toEqual([old])
+  await spawn($, 'a1', { description: 'job a1' })
+  await turn($, 'a1', 'start')
+  await tool($, 'a1', 'ls')
+  await clock.advance(SEC)
+  const ui = await mountPane($, 'terminal')
+  await ui.press({ key: 'a1/stop' })
+  await ui.press({ key: 'a1/confirm' })
+  const kept = (await readState($, 'stops')) as { id: string; label: string; lastTool: string }[]
+  expect(kept.map(r => r.id)).toEqual(['old', 'a1'])
+  expect([kept[1]?.label, kept[1]?.lastTool]).toEqual(['job a1', 'Bash'])
+  await ui.unmount()
+})
+
+test('a Stop confirmed twice in a row is recorded once', async ($, on) => {
+  const { clock } = standIns(on)
+  await start($)
+  await spawn($, 'a1', { description: 'job a1' })
+  await turn($, 'a1', 'start')
+  await clock.advance(SEC)
+  const ui = await mountPane($, 'terminal')
+  await ui.press({ key: 'a1/stop' })
+  // Both presses reach the button before the pane is drawn again, as a quick double click would.
+  await Promise.all([ui.press({ key: 'a1/confirm' }), ui.press({ key: 'a1/confirm' })])
+  await clock.advance(SEC)
+  expect(((await readState($, 'stops')) as unknown[]).length).toBe(1)
+  await ui.unmount()
+})
+
+test('a subagent turn that ends with no Stop confirm open writes no confirm', async ($, on) => {
+  const { clock } = standIns(on)
+  await start($)
+  await spawn($, 'a1')
+  await turn($, 'a1', 'start')
+  await clock.advance(SEC)
+  const before = stateVersion('confirm')
+  await turn($, 'a1', 'end')
+  await clock.advance(SEC)
+  expect(stateVersion('confirm')).toBe(before)
 })

@@ -1,4 +1,4 @@
-import type { AgentRow, TurnSummary } from '../types'
+import type { AgentRow, Tokens, TurnSummary } from '../types'
 import { clean } from './clean.ts'
 import { activeMs, newTokens } from './tracker.ts'
 
@@ -66,6 +66,24 @@ export function statusLine(rows: readonly AgentRow[], warnings: number, now: num
   return warnings > 0 ? `${line} · ${plural(warnings, 'warning')}` : line
 }
 
+// One agent's share of a summary, as the Details lines draw it.
+export function breakdownLine(row: { label: string; tokens: number; activeMs: number }): string {
+  return `"${row.label}" · ${formatTokens(row.tokens)} tok · ${formatDuration(row.activeMs)} active`
+}
+
 export function summaryLine(s: TurnSummary, longestLabel: string): string {
   return `${plural(s.agents, 'agent')} · ${formatTokens(s.tokens)} tok · ${formatDuration(s.activeMs)} active combined · longest: "${longestLabel}" ${formatDuration(s.longest.activeMs)} active`
+}
+
+// A cost estimate from the prices per million tokens. The usual cache ratios apply: a cache write costs 1.25x the input
+// price and a cache read 0.1x.
+export function costOf(tokens: Tokens, price: { input: number; output: number }): number {
+  return (tokens.input + tokens.cacheWrite * 1.25 + tokens.cacheRead * 0.1) * price.input / 1e6 + tokens.output * price.output / 1e6
+}
+
+// $0.42 with two decimals (under half a cent is $0.00); from 1000 up, whole units with a thousands separator: $1,234.
+export function formatCost(n: number, currency: string): string {
+  const c = Math.round(n * 100) / 100
+  if (c >= 1000) return `${currency}${Math.round(c).toLocaleString('en-US')}`
+  return `${currency}${c.toFixed(2)}`
 }

@@ -6,7 +6,7 @@ import { buttonBoxes, columnBoxes, drawnTexts, mountBand, readAlerts, readState,
 const SEC = 1000
 const fakeKey = 'gh' + 'p_' + 'A'.repeat(36)
 const info = (id: string) => ({ id, description: 'Fix tests', type: 'general-purpose', status: 'running' }) as never
-const REPEAT = '! "Fix tests" made the same Bash call 2 times'
+const REPEAT = '! "Fix tests" made the same Bash call 2 times in a row'
 const opts = { options: { repeatCount: 2 } }
 
 const texts = async (ui: Mounted): Promise<string[]> => (await ui.findAll({ type: 'Text' })).map(t => t.text)
@@ -157,6 +157,92 @@ test('the summary shows after a main turn and goes at the next one', async ($, o
   await ui.unmount()
 })
 
+test("the summary's Details button lists each agent's share, longest first, with the label masked", async ($, on) => {
+  const { clock, setUsage } = standIns(on, [info('a1'), info('a2')])
+  await start($)
+  await turn($, undefined, 'start')
+  await spawn($, 'a1', { description: 'job a1' })
+  await spawn($, 'a2', { description: 'deploy ' + fakeKey })
+  await turn($, 'a1', 'start')
+  await turn($, 'a2', 'start')
+  setUsage({ input_tokens: 1000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'm1' })
+  await step($, 'a1')
+  setUsage({ input_tokens: 500, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'm1' })
+  await step($, 'a2')
+  const r1 = tool($, 'a2', 'sleep 3000')
+  await clock.advance(3 * SEC)
+  await r1
+  const r2 = tool($, 'a1', 'sleep 2000')
+  await clock.advance(2 * SEC)
+  await r2
+  await turn($, 'a1', 'end')
+  await turn($, 'a2', 'end')
+  await turn($, undefined, 'end')
+  await clock.advance(SEC)
+  const ui = await mountBand($, 'terminal')
+  expect(await keys(ui)).toContain('summary/details')
+  expect(await keys(ui)).toContain('summary/dismiss')
+  expect((await ui.find({ key: 'summary/details' }))?.text).toBe('Details')
+  const lineOf = (all: string[]) => all.filter(t => / tok · .* active$/.test(t) && t.startsWith('"'))
+  expect(lineOf(await texts(ui))).toEqual([])
+  await ui.press({ key: 'summary/details' })
+  expect(lineOf(await texts(ui))).toEqual(['"deploy [redacted]" · 500 tok · 3s active', '"job a1" · 1k tok · 2s active'])
+  expect((await ui.find({ key: 'summary/details' }))?.text).toBe('Hide details')
+  expect(JSON.stringify(await ui.drawn())).not.toContain(fakeKey)
+  await ui.press({ key: 'summary/details' })
+  expect(lineOf(await texts(ui))).toEqual([])
+  await ui.unmount()
+})
+
+test('the summary Details lists at most three agents and counts the rest', async ($, on) => {
+  const ids = ['a1', 'a2', 'a3', 'a4']
+  const { clock, setUsage } = standIns(on, ids.map(id => info(id)))
+  await start($)
+  await turn($, undefined, 'start')
+  for (const id of ids) {
+    await spawn($, id, { description: 'job ' + id })
+    await turn($, id, 'start')
+  }
+  for (const id of ids) {
+    setUsage({ input_tokens: 100, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'm1' })
+    await step($, id)
+  }
+  for (const id of ids) await turn($, id, 'end')
+  await turn($, undefined, 'end')
+  await clock.advance(SEC)
+  const ui = await mountBand($, 'terminal')
+  await ui.press({ key: 'summary/details' })
+  const all = await texts(ui)
+  expect(all.filter(t => / tok · .* active$/.test(t) && t.startsWith('"'))).toHaveLength(3)
+  expect(all).toContain('+1 more in /reinwatch')
+
+  await ui.unmount()
+})
+
+test('a new summary starts with its Details closed', async ($, on) => {
+  const { clock, setUsage } = standIns(on, [info('a1')])
+  await start($)
+  await turn($, undefined, 'start')
+  await spawn($, 'a1', { description: 'job a1' })
+  await turn($, 'a1', 'start')
+  setUsage({ input_tokens: 100, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'm1' })
+  await step($, 'a1')
+  await turn($, undefined, 'end')
+  await clock.advance(SEC)
+  const ui = await mountBand($, 'terminal')
+  await ui.press({ key: 'summary/details' })
+  expect((await ui.find({ key: 'summary/details' }))?.text).toBe('Hide details')
+  await ui.unmount()
+  await turn($, undefined, 'start')
+  setUsage({ input_tokens: 200, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'm1' })
+  await step($, 'a1')
+  await turn($, undefined, 'end')
+  await clock.advance(SEC)
+  const again = await mountBand($, 'terminal')
+  expect((await again.find({ key: 'summary/details' }))?.text).toBe('Details')
+  await again.unmount()
+})
+
 test('each warning is notified once with the mod\'s title', opts, async ($, on) => {
   const { clock, seen } = standIns(on, [info('a1')])
   await start($)
@@ -210,9 +296,9 @@ test('the band shows the three newest warnings, newest first, and counts the res
   const ui = await mountBand($, 'terminal')
   const warnings = (await texts(ui)).filter(t => t.startsWith('! '))
   expect(warnings).toEqual([
-    '! "job a4" made the same Bash call 2 times',
-    '! "job a3" made the same Bash call 2 times',
-    '! "job a2" made the same Bash call 2 times',
+    '! "job a4" made the same Bash call 2 times in a row',
+    '! "job a3" made the same Bash call 2 times in a row',
+    '! "job a2" made the same Bash call 2 times in a row',
   ])
   expect(await texts(ui)).toContain('+1 more warnings in /reinwatch')
   expect(await keys(ui)).not.toContain('repeat:a1/dismiss')
@@ -345,7 +431,7 @@ test('a warning about an agent whose description holds an escape is drawn, with 
   await tool($, 'a1', 'ls')
   await clock.advance(1000)
   const ui = await mountBand($, 'terminal')
-  expect(await drawnTexts(ui)).toContain('! "Fix tests" made the same Bash call 2 times')
+  expect(await drawnTexts(ui)).toContain('! "Fix tests" made the same Bash call 2 times in a row')
   expect(JSON.stringify(await ui.drawn())).toContain('"key":"repeat:a1/stop"')
   await ui.unmount()
 })

@@ -2,15 +2,17 @@ import { atom, read, update } from 'claude-code'
 import type { On } from 'claude-code'
 import type { AgentRow, Alert, Summary } from '../types'
 import { ASK_TO_STOP, ASKED_TOAST, cannotMessage, cannotShow, hasMainView, isLive, masker, type ListCache, type WatchActions } from './actions.ts'
-import { label } from './format.ts'
+import { breakdownLine, label } from './format.ts'
 import { PANE_ID, PANE_TITLE } from './pane.tsx'
 
 // Twins of the atoms register.tsx and pane.tsx declare (same ref, initial value and shape tag): the engine refuses imported atoms.
 const agentsAtom = atom({ plugin: 'reinwatch', key: 'agents' } as const, {} as Record<string, AgentRow>, { shape: 'agents-1' })
 const alertsAtom = atom({ plugin: 'reinwatch', key: 'alerts' } as const, [] as Alert[], { shape: 'alerts-1' })
 const dismissedAtom = atom({ plugin: 'reinwatch', key: 'dismissed' } as const, [] as string[])
-const summaryAtom = atom({ plugin: 'reinwatch', key: 'summary' } as const, null as Summary | null, { shape: 'summary-1' })
+const summaryAtom = atom({ plugin: 'reinwatch', key: 'summary' } as const, null as Summary | null, { shape: 'summary-2' })
 const confirmAtom = atom({ plugin: 'reinwatch', key: 'confirm' } as const, null as string | null)
+// Twin of the pane's: whether the summary's per-agent lines are drawn.
+const summaryOpenAtom = atom({ plugin: 'reinwatch', key: 'summaryOpen' } as const, null as number | null)
 
 const SHOWN = 3
 
@@ -21,9 +23,11 @@ export function registerBand(on: On, actions: WatchActions, isMasking: () => boo
     const alerts = await read($, alertsAtom)
     const dismissed = await read($, dismissedAtom)
     const summary = await read($, summaryAtom)
+    const summaryOpen = await read($, summaryOpenAtom)
     const open = alerts.filter(a => !dismissed.includes(a.key)).reverse()
     const summaryKey = summary === null ? '' : `summary:${summary.at}`
     const showSummary = summary !== null && !dismissed.includes(summaryKey)
+    const summaryIsOpen = summary !== null && summaryOpen === summary.at
     if (open.length === 0 && !showSummary) return next(e)
 
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -95,9 +99,15 @@ export function registerBand(on: On, actions: WatchActions, isMasking: () => boo
         })}
         {more > 0 && <Text dimColor>{`+${more} more warnings in /reinwatch`}</Text>}
         {showSummary && (
-          <Box key={summaryKey} gap="sm" flexWrap="wrap">
-            <Text dimColor>{mask(summary.text)}</Text>
-            <Button key="summary/dismiss" label="Dismiss" onPress={async () => { await actions.dismiss(summaryKey) }} />
+          <Box key={summaryKey} flexDirection="column" gap="sm">
+            <Box gap="sm" flexWrap="wrap">
+              <Text dimColor>{mask(summary.text)}</Text>
+              <Button key="summary/details" label={summaryIsOpen ? 'Hide details' : 'Details'}
+                onPress={async () => { await update($, summaryOpenAtom, () => (summaryIsOpen ? null : summary.at)) }} />
+              <Button key="summary/dismiss" label="Dismiss" onPress={async () => { await actions.dismiss(summaryKey) }} />
+            </Box>
+            {summaryIsOpen && summary.rows.slice(0, SHOWN).map((r, i) => <Text key={`summary/row:${i}`} dimColor>{mask(breakdownLine(r))}</Text>)}
+            {summaryIsOpen && summary.rows.length > SHOWN && <Text key="summary/more" dimColor>{`+${summary.rows.length - SHOWN} more in /reinwatch`}</Text>}
           </Box>
         )}
       </Box>

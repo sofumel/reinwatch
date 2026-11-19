@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentInfo, Register, Timer } from 'claude-code'
-import type { AgentRow, Alert, Settings, Summary, Totals } from '../types'
+import type { AgentRow, Alert, Settings, StopRecord, Summary, Totals } from '../types'
 import type { ListCache, WatchActions } from './actions.ts'
 import { checkAgent, checkAll, checkSpawn, pruneDismissed } from './alerts.ts'
 import { clean } from './clean.ts'
@@ -13,12 +13,13 @@ import { redact } from './redact.ts'
 import { readSettings } from './settings.ts'
 import { isStopped, isStoppedIn, STOP_DENY, stoppedStep } from './stop.ts'
 import {
-  adoptReadBack, allowResume, asksPerson, endListed, endMainTurn, listDue, markStopped, newTracker, noteSpawn, stepEnded, stepStarted, toolAsked, toolEnded, toolStarted, turnEnded, turnStarted,
+  activeMs, adoptReadBack, allowResume, asksPerson, endListed, endMainTurn, listDue, markStopped, newTokens, newTracker, noteSpawn, stepEnded, stepStarted, toolAsked, toolEnded, toolStarted, turnEnded, turnStarted,
   type Tracker,
 } from './tracker.ts'
 
 // The wiring only: what the hooks do with the events, the state the module keeps, the tick and the flush.
 const KEEP_ALERTS = 50
+const KEEP_STOPS = 50
 // Rows are copied and written on every flush, and a label shows 60 characters, so a row keeps no more than this of a text.
 const KEPT_TEXT = 200
 const KEPT_NAME = 100
@@ -27,15 +28,18 @@ const KEPT_NAME = 100
 const agentsAtom = atom({ plugin: 'reinwatch', key: 'agents' } as const, {} as Record<string, AgentRow>, { shape: 'agents-1' })
 const alertsAtom = atom({ plugin: 'reinwatch', key: 'alerts' } as const, [] as Alert[], { shape: 'alerts-1' })
 const dismissedAtom = atom({ plugin: 'reinwatch', key: 'dismissed' } as const, [] as string[])
-const summaryAtom = atom({ plugin: 'reinwatch', key: 'summary' } as const, null as Summary | null, { shape: 'summary-1' })
-const historyAtom = atom({ plugin: 'reinwatch', key: 'history' } as const, { agents: 0, tokens: 0, activeMs: 0 } as Totals, { shape: 'history-1' })
-type Stored = { rows: Record<string, AgentRow>; alerts: Alert[]; dismissed: string[] }
+const stopsAtom = atom({ plugin: 'reinwatch', key: 'stops' } as const, [] as StopRecord[], { shape: 'stops-1' })
+const summaryAtom = atom({ plugin: 'reinwatch', key: 'summary' } as const, null as Summary | null, { shape: 'summary-2' })
+const historyAtom = atom({ plugin: 'reinwatch', key: 'history' } as const, { agents: 0, tokens: 0, activeMs: 0, maxTokens: 0, maxActiveMs: 0 } as Totals, { shape: 'history-1' })
+// The pane's own, declared again here (an atom cannot be imported from another file): the agent whose Stop awaits a yes.
+const confirmAtom = atom({ plugin: 'reinwatch', key: 'confirm' } as const, null as string | null)
+type Stored = { rows: Record<string, AgentRow>; alerts: Alert[]; dismissed: string[]; stops: StopRecord[] }
 // The engine itself cannot be kept (a module may only spell `$.noun.event(...)`), so what the tick needs is kept as
 // small closures made inside the hook that has `$`.
 type Live = {
   now: () => Promise<number>
   status: (text: string | undefined) => void
-  write: (rows: Record<string, AgentRow>, alerts: Alert[], dismissed: string[]) => Promise<void>
+  write: (rows: Record<string, AgentRow>, alerts: Alert[], dismissed: string[], stops: StopRecord[]) => Promise<void>
   redraw: () => void
   notify: (text: string) => Promise<void>
   open: () => Promise<void>
@@ -47,12 +51,12 @@ const LIST_EVERY_MS = 10_000
 
 const runtime: {
   tracker: Tracker; settings: Settings; live: Live | null
-  alerts: Alert[]; dismissed: string[]; fresh: Alert[]; dirty: boolean; lastStatus: string | undefined; ticker: Timer | null
+  alerts: Alert[]; dismissed: string[]; stops: StopRecord[]; fresh: Alert[]; dirty: boolean; lastStatus: string | undefined; ticker: Timer | null
   flushing: Promise<void> | null; again: boolean; adopted: boolean; adopting: Promise<void> | null; listedAt: number | null
   list: { at: number; list: AgentInfo[] } | null
 } = {
   tracker: newTracker(), settings: readSettings({}), live: null,
-  alerts: [], dismissed: [], fresh: [], dirty: false, lastStatus: undefined, ticker: null,
+  alerts: [], dismissed: [], stops: [], fresh: [], dirty: false, lastStatus: undefined, ticker: null,
   flushing: null, again: false, adopted: false, adopting: null, listedAt: null, list: null,
 }
 
@@ -78,6 +82,10 @@ function adopt(live: Live): Promise<void> {
       const dismissed = stored.dismissed
       for (const key of runtime.dismissed) if (!dismissed.includes(key)) dismissed.push(key)
       runtime.dismissed = dismissed
+      // The records of earlier Stops come first; one this instance made meanwhile is the same record only if `at` and `id` match.
+      const stops = [...stored.stops]
+      for (const s of runtime.stops) if (!stops.some(o => o.at === s.at && o.id === s.id)) stops.push(s)
+      runtime.stops = stops.slice(-KEEP_STOPS)
       adoptReadBack(runtime.tracker, stored.rows)
     } finally {
       runtime.adopting = null
@@ -164,8 +172,9 @@ async function writeOut(): Promise<void> {
     const rows = JSON.parse(JSON.stringify(runtime.tracker.agents))
     const alerts = [...runtime.alerts]
     const dismissed = [...runtime.dismissed]
+    const stops = [...runtime.stops]
     try {
-      await live.write(rows, alerts, dismissed)
+      await live.write(rows, alerts, dismissed, stops)
     } catch (error) {
       // Nothing was stored: the next flush writes it again.
       runtime.dirty = true
@@ -221,7 +230,14 @@ const actions: WatchActions = {
   stop: async agentId => {
     const now = await runtime.live?.now()
     if (now === undefined) return
-    markStopped(runtime.tracker, agentId, now)
+    // An agent already stopped (a second press before the pane was drawn again) gets no second record.
+    const wasStopped = runtime.tracker.agents[agentId]?.isStopped === true
+    const row = markStopped(runtime.tracker, agentId, now)
+    if (!wasStopped) {
+      runtime.stops = [...runtime.stops, {
+        id: agentId, label: label(row), at: now, tokens: newTokens(row.tokens), activeMs: activeMs(row, now), lastTool: row.lastTool ?? '',
+      }].slice(-KEEP_STOPS)
+    }
     runtime.dirty = true
     await flush()
   },
@@ -246,10 +262,11 @@ export const register: Register = (on, options) => {
     runtime.live = {
       now: () => $.clock.now(),
       status: text => { $.ui.status(text) },
-      write: async (rows, alerts, dismissed) => {
+      write: async (rows, alerts, dismissed, stops) => {
         await update($, agentsAtom, () => rows)
         await update($, alertsAtom, () => alerts)
         await update($, dismissedAtom, () => dismissed)
+        await update($, stopsAtom, () => stops)
       },
       redraw: () => { $.ui.invalidate('ui.render') },
       notify: async text => { await $.ui.notify(text, { title: 'reinwatch' }) },
@@ -259,6 +276,7 @@ export const register: Register = (on, options) => {
         rows: JSON.parse(JSON.stringify(await read($, agentsAtom))),
         alerts: [...await read($, alertsAtom)],
         dismissed: [...await read($, dismissedAtom)],
+        stops: [...await read($, stopsAtom)],
       }),
     }
     // A failed read-back is caught: the tick tries it again, and nothing is written before one succeeds.
@@ -268,7 +286,8 @@ export const register: Register = (on, options) => {
     // What waited for the read-back goes out now. A failed write leaves `dirty` set for the tick.
     await flush().catch(() => undefined)
     // After the ticker, so a failing call here can never leave the load without it.
-    await $.command.register({ name: 'reinwatch', description: 'Show the agents Claude runs in a pane' })
+    // The command is a convenience: the totals and next(e) must not depend on it.
+    await $.command.register({ name: 'reinwatch', description: 'Show the agents Claude runs in a pane' }).catch(() => undefined)
     const now = await $.clock.now()
     const days = parseDays(await $.store.get(HISTORY_KEY))
     await update($, historyAtom, () => totals(days, localTime(now)))
@@ -289,7 +308,7 @@ export const register: Register = (on, options) => {
     return { text: 'Opened the reinwatch pane.' }
   })
 
-  registerPane(on, actions, () => runtime.settings.redact, listCache)
+  registerPane(on, actions, () => runtime.settings.redact, listCache, () => runtime.settings)
   registerBand(on, actions, () => runtime.settings.redact, listCache)
 
   on('agent.spawn', async ($, e, next) => {
@@ -331,6 +350,10 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) {
       turnEnded(runtime.tracker, e.agentId, e.reason, await $.clock.now())
       runtime.dirty = true
+      // A Stop confirm still open for this agent is dropped, so it does not come back unasked when the agent is live again.
+      // Written only when that is the case, and a failed read or write is left alone: the turn has ended either way.
+      const pending = await read($, confirmAtom).catch(() => null)
+      if (pending === e.agentId) await update($, confirmAtom, current => (current === e.agentId ? null : current)).catch(() => undefined)
     } else {
       // The summary covers what the agents did since the last one, between main turns included.
       const now = await $.clock.now()
@@ -339,7 +362,11 @@ export const register: Register = (on, options) => {
         const row = runtime.tracker.agents[s.longest.id]
         const longest = row === undefined ? `agent ${s.longest.id.slice(0, 8)}` : label(row)
         const text = summaryLine(s, longest)
-        await update($, summaryAtom, () => ({ text, at: now }))
+        const rows = s.rows.map(r => {
+          const agent = runtime.tracker.agents[r.id]
+          return { label: agent === undefined ? `agent ${r.id.slice(0, 8)}` : label(agent), tokens: r.tokens, activeMs: r.activeMs }
+        })
+        await update($, summaryAtom, () => ({ text, at: now, rows }))
         const days = addTurn(parseDays(await $.store.get(HISTORY_KEY)), s, localTime(now))
         await $.store.set(HISTORY_KEY, days)
         await update($, historyAtom, () => totals(days, localTime(now)))

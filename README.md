@@ -28,8 +28,8 @@ Claude Code's background tasks view lists tasks with elapsed time, opens their t
 ## What you see
 
 - **Status line:** `agents 2 running · 310k tok · 26m active`, with `· 1 warning` when one is open (`reinwatch: 1 warning` when no agent works).
-- **`/reinwatch` pane:** one row per agent (state, name, tokens, active time, type, model, turns) with its buttons, the open warnings, the latest summary and `Last 30 days: 12 agents · 1.1M tok · 3h active`.
-- **Band above the prompt:** the open warnings with their buttons, and after each turn `3 agents · 420k tok · 14m active combined · longest: "Explore the repo" 9m active`.
+- **`/reinwatch` pane:** one row per agent (state, name, tokens, active time, type, model, turns) with its buttons, the open warnings, the latest summary and `Last 30 days: 12 agents · 1.1M tok · 3h active` and `Peaks: 26m active · 2.1M tok per agent (limits 30m · 1M)` to help you tune the limits. Warnings you dismiss stay listed under **Dismissed warnings** for the session. The summary's **Details** button lists each agent's share. Each Stop is kept under **Stopped** with the agent's tokens, time and last tool.
+- **Band above the prompt:** the open warnings with their buttons, and after each turn `3 agents · 420k tok · 14m active combined · longest: "Explore the repo" 9m active`. Its **Details** button lists each agent's share.
 
 ## Warnings and settings
 
@@ -37,12 +37,13 @@ Claude Code's background tasks view lists tasks with elapsed time, opens their t
 |---|---|---|---|
 | Long run | one agent has worked longer than the limit | `activeMinutes` | 30 |
 | Tokens | one agent has taken in more new tokens than the limit | `tokenMillions` | 1 |
-| Repeat | one agent makes the same tool call with the same input this many times | `repeatCount` | 5 |
+| Repeat | one agent makes the same tool call with the same input this many times in a row | `repeatCount` | 5 |
 | Failures | one agent has this many tool failures in a row | `failStreak` | 5 |
 | Burst | this many agents start within the window | `burstCount`, `burstMinutes` | 10 in 2 minutes |
 | Workflow run | one workflow run starts this many agents | `burstCount` | 10 |
 
-Also `notify` (true), `openPaneOnWarning` (false) and `redact` (true: mask key-like text in descriptions). Set them in the plugin's options; minutes and millions may be fractional (`0.5`).
+Also `notify` (true), `openPaneOnWarning` (false), `redact` (true: mask key-like text in descriptions) and `mute` ("" — a comma-separated list of warning kinds to silence, e.g. `burst,run`). Set them in the plugin's options; minutes and millions may be fractional (`0.5`).
+Set `priceInput` and `priceOutput` (per million tokens) to see a cost estimate on each row and for the session; `currency` sets the symbol (default `$`). Cache writes count 1.25× input, cache reads 0.1×.
 
 Token counts are new tokens: input, cache writes and output. Cache reads are left out of the counts and the token warning and shown only under **Details**. In the terminal, warnings also reach the terminal's own notifications; in the desktop app they show only through your own `Notification` hook: see [docs/notifications.md](docs/notifications.md).
 
@@ -57,7 +58,7 @@ Requires Claude Code 2.1.300 or later, in the terminal or the desktop app's Code
 ## Stopping and privacy
 
 - **Stop** denies the agent's new tool calls and answers its next model call with a reply telling it to report and not resume. A running tool finishes first (the row reads `stopping (a tool is still running)`), **Allow resume** lifts the stop, and stopping one agent does not stop its workflow.
-- No network access, shell commands or model calls. Only the 30-day store (per local day: agents, new tokens, active milliseconds) outlives the session; prompts, outputs and tool inputs are never kept, and a tool input becomes only an in-memory hash to spot repeats.
+- No network access, shell commands or model calls. Only the 30-day store (per local day: agents, new tokens, active milliseconds and the per-agent peaks) outlives the session; prompts, outputs and tool inputs are never kept, and a tool input becomes only an in-memory hash to spot repeats.
 - `redact` replaces key-like text with `[redacted]` by its look alone: a guard against accidents, not a guarantee.
 
 ## Limitations
@@ -91,8 +92,8 @@ Claude Code のバックグラウンドタスク画面では、タスクの一�
 ### 表示されるもの
 
 - **ステータス行:** `agents 2 running · 310k tok · 26m active`。警告があると `· 1 warning` が付き、動いているエージェントがいなければ `reinwatch: 1 warning` になります。
-- **`/reinwatch` の一覧:** エージェントごとの行（状態・名前・トークン・実稼働時間・種類・モデル・ターン数）とボタン、開いている警告、最新のまとめ、`Last 30 days: 12 agents · 1.1M tok · 3h active`。
-- **入力欄の上の帯:** 開いている警告とボタン。ターンの終わりには `3 agents · 420k tok · 14m active combined · longest: "Explore the repo" 9m active`。
+- **`/reinwatch` の一覧:** エージェントごとの行（状態・名前・トークン・実稼働時間・種類・モデル・ターン数）とボタン、開いている警告、最新のまとめ、`Last 30 days: 12 agents · 1.1M tok · 3h active`、しきい値の調整の目安として `Peaks: 26m active · 2.1M tok per agent (limits 30m · 1M)` も出ます。消した警告は、そのセッションの間は **Dismissed warnings** の下に残ります。まとめの **Details** を押すと、エージェントごとの内訳が出ます。Stop の記録は **Stopped** の下に残ります（トークン・時間・最後のツール）。
+- **入力欄の上の帯:** 開いている警告とボタン。ターンの終わりには `3 agents · 420k tok · 14m active combined · longest: "Explore the repo" 9m active`。**Details** を押すと、エージェントごとの内訳が出ます。
 
 ### 警告と設定
 
@@ -100,12 +101,13 @@ Claude Code のバックグラウンドタスク画面では、タスクの一�
 |---|---|---|---|
 | Long run | 1 体の実稼働時間が上限を超えた | `activeMinutes` | 30 |
 | Tokens | 1 体の新規トークンが上限を超えた | `tokenMillions` | 1 |
-| Repeat | 1 体が同じ入力で同じツールをこの回数呼んだ | `repeatCount` | 5 |
+| Repeat | 1 体が同じ入力で同じツールをこの回数続けて呼んだ | `repeatCount` | 5 |
 | Failures | 1 体のツールの失敗がこの回数続いた | `failStreak` | 5 |
 | Burst | 期間内にこの数のエージェントが起動した | `burstCount`, `burstMinutes` | 2 分で 10 |
 | Workflow run | 1 回のワークフロー実行がこの数のエージェントを起動した | `burstCount` | 10 |
 
-ほかに `notify`（true）、`openPaneOnWarning`（false）、`redact`（true: 説明文のキーらしい文字列を伏せる）があります。設定はプラグインのオプションで変えられ、分と百万の値には小数（`0.5`）も使えます。
+ほかに `notify`（true）、`openPaneOnWarning`（false）、`redact`（true: 説明文のキーらしい文字列を伏せる）、`mute`（"" — 出さない警告の種類をコンマ区切りで。例: `burst,run`）があります。設定はプラグインのオプションで変えられ、分と百万の値には小数（`0.5`）も使えます。
+`priceInput` と `priceOutput`（100 万トークンあたり）を設定すると、各行とセッション全体に費用の目安が出ます（通貨記号は `currency`、既定は `$`）（キャッシュ書き込みは入力の 1.25 倍、読み込みは 0.1 倍で計算）。
 
 トークン数は新規トークン（入力・キャッシュ書き込み・出力）です。キャッシュ読み込みは数にもトークン警告にも含めず、**Details** にだけ表示します。ターミナルでは警告がターミナル自身の通知にも届きます。デスクトップアプリでは、自分で設定した `Notification` フックを通したときだけ表示されます（[docs/notifications.md](docs/notifications.md) を参照）。
 
@@ -120,7 +122,7 @@ Claude Code 2.1.300 以降が必要です（ターミナル、またはデスク
 ### 停止とプライバシー
 
 - **Stop** は、エージェントの新しいツール呼び出しを拒否し、次のモデル呼び出しには途中経過を報告して再開しないよう伝える返答を返します。実行中のツールは最後まで動き（行は `stopping (a tool is still running)` と表示）、**Allow resume** で停止を解除できます。1 体を止めても、そのワークフローは止まりません。
-- ネットワーク、シェルコマンド、モデル呼び出しは使いません。セッションをまたいで残るのは 30 日分の記録（現地の日ごとの、エージェント数・新規トークン数・実稼働ミリ秒）だけです。プロンプト、出力、ツールの入力は保存せず、ツールの入力は繰り返しを見つけるためのメモリ上のハッシュにするだけです。
+- ネットワーク、シェルコマンド、モデル呼び出しは使いません。セッションをまたいで残るのは 30 日分の記録（現地の日ごとの、エージェント数・新規トークン数・実稼働ミリ秒・1 体あたりの最大値）だけです。プロンプト、出力、ツールの入力は保存せず、ツールの入力は繰り返しを見つけるためのメモリ上のハッシュにするだけです。
 - `redact` は、見た目だけを手がかりにキーらしい文字列を `[redacted]` に置き換えます。うっかり漏れるのを防ぐためのもので、保証ではありません。
 
 ### 制限事項

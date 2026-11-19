@@ -3,7 +3,7 @@ import { readSettings } from '../hooks/settings.ts'
 
 test('defaults match plugin.json', () => {
   expect(readSettings({})).toEqual({ activeMs: 1_800_000, tokenLimit: 1_000_000, repeatCount: 5, failStreak: 5,
-    burstCount: 10, burstWindowMs: 120_000, notify: true, openPaneOnWarning: false, redact: true })
+    burstCount: 10, burstWindowMs: 120_000, notify: true, openPaneOnWarning: false, redact: true, muted: new Set(), price: null })
 })
 
 test('the token warning defaults to one million new tokens', () => {
@@ -24,4 +24,24 @@ test('valid values are used; booleans only when they are booleans', () => {
 
 test('a value too small to scale falls back', () => {
   expect(readSettings({ activeMinutes: 1e-12 }).activeMs).toBe(1_800_000)
+})
+
+test('mute lists the kinds to silence: case-insensitive, spaces allowed, unknown words ignored', () => {
+  expect([...readSettings({ mute: 'Burst, run' }).muted].sort()).toEqual(['burst', 'run'])
+  expect([...readSettings({}).muted]).toEqual([])
+  expect([...readSettings({ mute: 'nope' }).muted]).toEqual([])
+  expect([...readSettings({ mute: 7 }).muted]).toEqual([])
+})
+
+test('price is set only when both prices are above 0; the currency defaults to $', () => {
+  expect(readSettings({ priceInput: 3, priceOutput: 15 }).price).toEqual({ input: 3, output: 15, currency: '$' })
+  expect(readSettings({ priceInput: 3 }).price).toBeNull()
+  expect(readSettings({ priceOutput: 15 }).price).toBeNull()
+  expect(readSettings({ priceInput: 0, priceOutput: 15 }).price).toBeNull()
+  expect(readSettings({ priceInput: '3', priceOutput: 15 }).price).toBeNull()
+  expect(readSettings({ priceInput: 3, priceOutput: 15, currency: '¥' }).price?.currency).toBe('¥')
+  expect(readSettings({ priceInput: 3, priceOutput: 15, currency: '' }).price?.currency).toBe('$')
+  expect(readSettings({ priceInput: 3, priceOutput: 15, currency: 7 }).price?.currency).toBe('$')
+  expect(readSettings({ priceInput: 3, priceOutput: 15, currency: '€\u0007' }).price?.currency).toBe('€')
+  expect(readSettings({ priceInput: 3, priceOutput: 15, currency: '\u0007' }).price?.currency).toBe('$')
 })

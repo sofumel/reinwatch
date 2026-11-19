@@ -20,7 +20,7 @@ export type Seen = {
 // `answers.notifyMs` holds each notification that long on the mock clock, as a person's slow Notification hook would.
 // `answers.now` is the mock clock's start (default 0). `holdWrites(ms)` holds each write of an atom that long from then
 // on (call it after start), `holdList()` holds the answer of agent.list until `releaseList()`, `writes` counts the writes in flight and the most there ever were at once, and `lists.calls` counts the asks of agent.list.
-export function standIns(on: On, listed: AgentInfo[] = [], answers: { view?: { deny?: string }; send?: { isDelivered: false; reason: string }; notifyMs?: number; now?: number } = {}): {
+export function standIns(on: On, listed: AgentInfo[] = [], answers: { view?: { deny?: string }; send?: { isDelivered: false; reason: string }; notifyMs?: number; now?: number; commandFails?: boolean } = {}): {
   seen: Seen; clock: MockClock; setUsage(u: TurnUsage | null): void
   holdWrites(ms: number): void; holdList(): void; releaseList(): void; writes: { inFlight: number; max: number; total: number }
   lists: { calls: number }
@@ -58,7 +58,10 @@ export function standIns(on: On, listed: AgentInfo[] = [], answers: { view?: { d
   on('store.keys', () => ({ value: [...stored.keys()] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
-  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('command.register', (_, e) => {
+    if (answers.commandFails === true) throw new Error('no commands here')
+    return { value: { command: e.name } }
+  })
   on('ui.open', (_, e) => { seen.opened.push(e.id); return { value: { isPlaced: true } } })
   on('ui.status', (_, e) => { seen.statuses.push(e.text); return { value: undefined } })
   on('ui.toast', (_, e) => { seen.toasts.push(e.text); return { value: undefined } })

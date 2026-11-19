@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { clean } from '../hooks/clean.ts'
-import { cut, formatDuration, formatTokens, label, plural, statusLabel, statusLine, summaryLine } from '../hooks/format.ts'
+import { breakdownLine, costOf, cut, formatCost, formatDuration, formatTokens, label, plural, statusLabel, statusLine, summaryLine } from '../hooks/format.ts'
 import { redact } from '../hooks/redact.ts'
 import type { AgentRow, TurnSummary } from '../types'
 
@@ -67,9 +67,13 @@ test('statusLine', () => {
 })
 
 test('summaryLine', () => {
-  const turn: TurnSummary = { agents: 5, newAgents: 2, tokens: 3_200_000, activeMs: 41 * MIN, longest: { id: 'a1', activeMs: 26 * MIN } }
+  const turn: TurnSummary = { agents: 5, newAgents: 2, tokens: 3_200_000, activeMs: 41 * MIN, longest: { id: 'a1', activeMs: 26 * MIN }, rows: [] }
   expect(summaryLine(turn, 'Research mod APIs')).toBe('5 agents · 3.2M tok · 41m active combined · longest: "Research mod APIs" 26m active')
   expect(summaryLine({ ...turn, agents: 1 }, 'Research mod APIs')).toStartWith('1 agent · ')
+})
+
+test('breakdownLine', () => {
+  expect(breakdownLine({ label: 'job a1', tokens: 1000, activeMs: 2000 })).toBe('"job a1" · 1k tok · 2s active')
 })
 
 // Rules the tests above do not reach.
@@ -308,4 +312,25 @@ test('cut keeps the first code points and never splits an emoji', () => {
   expect(cut('abc', 3)).toBe('abc')
   expect(cut(smile.repeat(5), 3)).toBe(smile.repeat(3))
   expect(cut('', 3)).toBe('')
+})
+
+test('costOf prices cache writes at 1.25x input and cache reads at 0.1x', () => {
+  const t = (input: number, cacheWrite: number, cacheRead: number, output: number) => ({ input, cacheWrite, cacheRead, output })
+  expect(Math.round(costOf(t(1_000_000, 0, 0, 100_000), { input: 3, output: 15 }) * 1e9) / 1e9).toBe(4.5)
+  expect(Math.round(costOf(t(0, 1_000_000, 0, 0), { input: 4, output: 20 }) * 1e9) / 1e9).toBe(5)
+  expect(Math.round(costOf(t(0, 0, 1_000_000, 0), { input: 4, output: 20 }) * 1e9) / 1e9).toBe(0.4)
+  expect(costOf(t(0, 0, 0, 0), { input: 4, output: 20 })).toBe(0)
+})
+
+test('formatCost: two decimals, $0.00 below half a cent, no decimals from 1000 with a separator', () => {
+  expect(formatCost(0.42, '$')).toBe('$0.42')
+  expect(formatCost(0.004, '$')).toBe('$0.00')
+  expect(formatCost(0, '$')).toBe('$0.00')
+  expect(formatCost(0.005, '$')).toBe('$0.01')
+  expect(formatCost(999.994, '€')).toBe('€999.99')
+  expect(formatCost(999.995, '$')).toBe('$1,000')
+  expect(formatCost(999.994, '$')).toBe('$999.99')
+  expect(formatCost(1000, '$')).toBe('$1,000')
+  expect(formatCost(1234.56, '$')).toBe('$1,235')
+  expect(formatCost(1234567, '¥')).toBe('¥1,234,567')
 })

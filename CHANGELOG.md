@@ -4,6 +4,29 @@ All notable changes to `reinwatch` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-11-19
+
+### Added
+
+- The pane lists the warnings you dismissed, under a collapsible **Dismissed warnings** heading, for the session.
+- **Details** on the turn summary lists each agent's new tokens and active time.
+- A `mute` option silences warning kinds you do not want (for example `burst,run`).
+- The pane keeps a record of each Stop: the agent, its tokens and time at that moment, and its last tool.
+- With `priceInput` and `priceOutput` set, the pane shows a cost estimate per agent and for the session.
+- The pane shows the 30-day peaks (longest active time and most tokens by one agent) next to the limits.
+
+### Changed
+
+- The Repeat warning counts the same call made in a row; a different call from the same agent starts the count over.
+
+### Fixed
+
+- A Stop confirmation still open when its agent ends its turn is dropped, so it does not reappear when that agent runs again.
+- Allow resume pressed before the stored rows are read back is no longer undone by the Stop stored before the reload.
+- The 30-day totals are read even when the `/reinwatch` command cannot be registered.
+- Burst warnings no longer leave a growing list of keys in memory.
+- Pressing **Yes, stop** twice before the pane redraws keeps one Stop record, not two.
+
 ## [1.0.0] — 2026-11-11
 
 Initial public release: a token and runaway watchdog for the subagents, teammates and workflow agents Claude Code runs. Requires Claude Code 2.1.300 or later, in the terminal or the desktop app's Code tab.

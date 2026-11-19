@@ -1,5 +1,6 @@
 import type { AgentStatus, TurnUsage } from 'claude-code'
 import type { AgentRow, RowStatus, Tokens, TurnSummary } from '../types'
+import { clean } from './clean.ts'
 
 // The record of the agents Claude runs: plain data and plain functions. Functions that depend on time take it as
 // `now` and none reads a clock, so a test can replay any run exactly.
@@ -9,9 +10,10 @@ export type Reported = { tokens: number; activeMs: number }
 export type Tracker = {
   agents: Record<string, AgentRow>
   calls: Record<string, OpenCall>                  // open tool calls by tool_use_id
-  // agentId → fingerprint → calls, in order of last use. A Map because a fingerprint can be all digits, and an object
-  // would list such keys first whatever their use; the first key is the one unused the longest, dropped over the cap.
-  repeats: Record<string, Map<string, number>>
+  // agentId → the fingerprint of the agent's last call and how many times in a row it was made. A different call
+  // from the same agent starts the run over.
+  repeats: Record<string, { key: string; count: number }>
+  resumed: Record<string, true>                    // agentId → Allow resume was pressed here (and no Stop since)
   spawns: number[]                                 // start times inside the burst window
   runs: Record<string, number>                     // workflow runId → agents started
   fired: Record<string, true>                      // alert keys already raised
@@ -27,9 +29,6 @@ export const NESTED_TOOLS: ReadonlySet<string> = new Set(['Agent', 'Workflow'])
 // Modes in which nobody is asked: every call is allowed outright, or a classifier decides at once.
 const NO_PROMPT_MODES: ReadonlySet<string> = new Set(['bypassPermissions', 'auto', 'dontAsk'])
 
-// How many different calls an agent's repeat counts keep.
-export const REPEAT_KEYS_MAX = 200
-
 // Whether the engine's agent list is to be asked for now: never asked yet, the interval is over, or the clock was set
 // back (waiting for it to catch up could take any time).
 export function listDue(listedAt: number | null, now: number, every: number): boolean {
@@ -37,7 +36,7 @@ export function listDue(listedAt: number | null, now: number, every: number): bo
 }
 
 export function newTracker(): Tracker {
-  return { agents: {}, calls: {}, repeats: {}, spawns: [], runs: {}, fired: {}, burstActive: false, reported: {} }
+  return { agents: {}, calls: {}, repeats: {}, resumed: {}, spawns: [], runs: {}, fired: {}, burstActive: false, reported: {} }
 }
 
 // The row of an agent first met without its spawn, for example one already running when reinwatch loaded.
@@ -132,25 +131,23 @@ export function stepEnded(t: Tracker, agentId: string, usage: TurnUsage | null, 
   if (usage.model) row.model = usage.model
 }
 
-// Returns how many times this agent has made this exact call, this one included.
+// Returns how many times in a row this agent has made this exact call, this one included.
 export function toolStarted(t: Tracker, c: { agentId: string; toolUseId: string; tool: string; key: string }, now: number): number {
   const row = ensureAgent(t, c.agentId, now)
-  // A call already open (the same tool_use_id seen again) changes nothing; report its key's count as it stands.
-  if (t.calls[c.toolUseId] !== undefined) return t.repeats[c.agentId]?.get(c.key) ?? 0
+  // A call already open (the same tool_use_id seen again) changes nothing; report the run's count as it stands.
+  if (t.calls[c.toolUseId] !== undefined) {
+    const run = t.repeats[c.agentId]
+    return run?.key === c.key ? run.count : 0
+  }
   const isCounted = !NESTED_TOOLS.has(c.tool)
   t.calls[c.toolUseId] = { agentId: c.agentId, isCounted }
   row.openTools += 1
+  row.lastTool = clean(c.tool)
   if (isCounted) startWork(row, now)
-  const seen = (t.repeats[c.agentId] ??= new Map())
-  const count = (seen.get(c.key) ?? 0) + 1
-  // Deleted and set again, so the Map stays in order of last use.
-  seen.delete(c.key)
-  seen.set(c.key, count)
-  if (seen.size > REPEAT_KEYS_MAX) {
-    const oldest = seen.keys().next()
-    if (oldest.done !== true) seen.delete(oldest.value)
-  }
-  return count
+  const last = t.repeats[c.agentId]
+  const run = last !== undefined && last.key === c.key ? { key: c.key, count: last.count + 1 } : { key: c.key, count: 1 }
+  t.repeats[c.agentId] = run
+  return run.count
 }
 
 // The call now waits on a person: it leaves the busy time but stays open.
@@ -177,15 +174,19 @@ export function toolEnded(t: Tracker, toolUseId: string, outcome: 'ok' | 'error'
   if (row.isStopped && row.openTools === 0) row.status = 'stopped'
 }
 
-export function markStopped(t: Tracker, agentId: string, now: number): void {
+// Returns the row as it stands, for the record of the Stop.
+export function markStopped(t: Tracker, agentId: string, now: number): AgentRow {
   const row = ensureAgent(t, agentId, now)
   row.isStopped = true
+  delete t.resumed[agentId]
   row.status = stoppedStatus(row)
+  return row
 }
 
 export function allowResume(t: Tracker, agentId: string, now: number): void {
   const row = ensureAgent(t, agentId, now)
   row.isStopped = false
+  t.resumed[agentId] = true
   row.status = row.inTurn ? 'running' : restingStatus(row)
 }
 
@@ -217,6 +218,7 @@ export function endMainTurn(t: Tracker, now: number): TurnSummary | null {
   let tokens = 0
   let workedMs = 0
   let longest: TurnSummary['longest'] | null = null
+  const rows: TurnSummary['rows'] = []
   for (const [id, row] of Object.entries(t.agents)) {
     const before = t.reported[id]
     const rowTokens = Math.max(0, newTokens(row.tokens) - (before?.tokens ?? 0))
@@ -226,10 +228,14 @@ export function endMainTurn(t: Tracker, now: number): TurnSummary | null {
     if (before === undefined) newAgents += 1
     tokens += rowTokens
     workedMs += rowMs
+    const total = { tokens: (before?.tokens ?? 0) + rowTokens, activeMs: (before?.activeMs ?? 0) + rowMs }
+    rows.push({ id, tokens: rowTokens, activeMs: rowMs, totalTokens: total.tokens, totalActiveMs: total.activeMs })
     if (longest === null || rowMs > longest.activeMs) longest = { id, activeMs: rowMs }
-    t.reported[id] = { tokens: (before?.tokens ?? 0) + rowTokens, activeMs: (before?.activeMs ?? 0) + rowMs }
+    t.reported[id] = total
   }
-  return longest === null ? null : { agents, newAgents, tokens, activeMs: workedMs, longest }
+  // The longest first (a stable sort: equal times stay in the order the agents were first seen).
+  rows.sort((a, b) => b.activeMs - a.activeMs)
+  return longest === null ? null : { agents, newAgents, tokens, activeMs: workedMs, longest, rows }
 }
 
 // After a reload, a row read back counts as reported up to what it holds: that work was summarized, or is past
@@ -243,13 +249,15 @@ export function markReported(t: Tracker, row: AgentRow): void {
 // lacks. Facts the kept row has no value for are filled in, the copy's tokens, time and turns are added, and the
 // person's Stop from before the reload still holds. The copy's totals count as reported, as for a row read back alone.
 export function foldReadBack(t: Tracker, mine: AgentRow, copy: AgentRow): void {
-  if (copy.isStopped && !mine.isStopped) markStopped(t, mine.id, mine.lastActiveAt)
+  // Unless Allow resume was pressed on this row in this instance: that is newer than the stored Stop.
+  if (copy.isStopped && !mine.isStopped && !t.resumed[mine.id]) markStopped(t, mine.id, mine.lastActiveAt)
   if (mine.description === '') mine.description = copy.description
   if (mine.type === '') mine.type = copy.type
   if (mine.model === '') mine.model = copy.model
   if (mine.parentId === undefined && copy.parentId !== undefined) mine.parentId = copy.parentId
   if (mine.runId === undefined && copy.runId !== undefined) mine.runId = copy.runId
   if (copy.isTeammate) mine.isTeammate = true
+  if (mine.lastTool === undefined && copy.lastTool !== undefined) mine.lastTool = copy.lastTool
   if (mine.permissionMode === undefined && copy.permissionMode !== undefined) mine.permissionMode = copy.permissionMode
   const before = t.reported[mine.id]
   markReported(t, copy)

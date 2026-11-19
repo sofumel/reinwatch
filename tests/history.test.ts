@@ -8,24 +8,24 @@ const DAY = 86_400_000
 const SEC = 1000
 // The day a clock reading falls on for the person, so no test depends on the machine's time zone.
 const localDay = (t: number): string => dayOf(localTime(t))
-const s: TurnSummary = { agents: 2, newAgents: 2, tokens: 1500, activeMs: 4000, longest: { id: 'a', activeMs: 3000 } }
+const s: TurnSummary = { agents: 2, newAgents: 2, tokens: 1500, activeMs: 4000, longest: { id: 'a', activeMs: 3000 }, rows: [] }
 const usage = { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'm1' }
 
 test('a turn adds to today', () => {
   expect(HISTORY_KEY).toBe('days-v2')
   expect(dayOf(now)).toBe('2026-11-03')
   const once = addTurn([], s, now)
-  expect(once).toEqual([{ day: '2026-11-03', agents: 2, tokens: 1500, activeMs: 4000 }])
-  expect(addTurn(once, s, now)).toEqual([{ day: '2026-11-03', agents: 4, tokens: 3000, activeMs: 8000 }])
+  expect(once).toEqual([{ day: '2026-11-03', agents: 2, tokens: 1500, activeMs: 4000, maxTokens: 0, maxActiveMs: 0 }])
+  expect(addTurn(once, s, now)).toEqual([{ day: '2026-11-03', agents: 4, tokens: 3000, activeMs: 8000, maxTokens: 0, maxActiveMs: 0 }])
 })
 
 test('days older than 30 days are dropped', () => {
-  const old = { day: '2026-10-03', agents: 1, tokens: 1, activeMs: 1 }
-  const kept = { day: '2026-10-06', agents: 1, tokens: 1, activeMs: 1 }
+  const old = { day: '2026-10-03', agents: 1, tokens: 1, activeMs: 1, maxTokens: 0, maxActiveMs: 0 }
+  const kept = { day: '2026-10-06', agents: 1, tokens: 1, activeMs: 1, maxTokens: 0, maxActiveMs: 0 }
   const out = addTurn([old, kept], s, now)
   expect(out.map(d => d.day)).toEqual(['2026-10-06', '2026-11-03'])
-  expect(Object.keys(out[0]!).sort()).toEqual(['activeMs', 'agents', 'day', 'tokens'])
-  expect(totals([old, kept], now)).toEqual({ agents: 1, tokens: 1, activeMs: 1 })
+  expect(Object.keys(out[0]!).sort()).toEqual(['activeMs', 'agents', 'day', 'maxActiveMs', 'maxTokens', 'tokens'])
+  expect(totals([old, kept], now)).toEqual({ agents: 1, tokens: 1, activeMs: 1, maxTokens: 0, maxActiveMs: 0 })
   expect(now - 29 * DAY).toBe(Date.UTC(2026, 9, 5, 12))
 })
 
@@ -36,8 +36,8 @@ test('garbage in the store reads as empty', () => {
 })
 
 test('totals add up the kept days', () => {
-  const days = [{ day: '2026-11-01', agents: 1, tokens: 10, activeMs: 100 }, { day: '2026-11-02', agents: 2, tokens: 20, activeMs: 200 }]
-  expect(totals(days, now)).toEqual({ agents: 3, tokens: 30, activeMs: 300 })
+  const days = [{ day: '2026-11-01', agents: 1, tokens: 10, activeMs: 100, maxTokens: 0, maxActiveMs: 0 }, { day: '2026-11-02', agents: 2, tokens: 20, activeMs: 200, maxTokens: 0, maxActiveMs: 0 }]
+  expect(totals(days, now)).toEqual({ agents: 3, tokens: 30, activeMs: 300, maxTokens: 0, maxActiveMs: 0 })
 })
 
 test('a main turn that ran agents leaves a summary and stores numbers only', { timeoutMs: 30_000 }, async ($, on) => {
@@ -59,9 +59,9 @@ test('a main turn that ran agents leaves a summary and stores numbers only', { t
   const stored = await readStore($, 'days-v2') as Record<string, unknown>[]
   expect(JSON.stringify(stored)).not.toContain('Zephyr')
   expect(stored.length).toBe(1)
-  for (const d of stored) expect(Object.keys(d).sort()).toEqual(['activeMs', 'agents', 'day', 'tokens'])
-  expect(stored[0]).toEqual({ day: localDay(Date.UTC(2026, 10, 5, 12)), agents: 1, tokens: 1200, activeMs: 2000 })
-  expect(await readState($, 'history')).toEqual({ agents: 1, tokens: 1200, activeMs: 2000 })
+  for (const d of stored) expect(Object.keys(d).sort()).toEqual(['activeMs', 'agents', 'day', 'maxActiveMs', 'maxTokens', 'tokens'])
+  expect(stored[0]).toEqual({ day: localDay(Date.UTC(2026, 10, 5, 12)), agents: 1, tokens: 1200, activeMs: 2000, maxTokens: 1200, maxActiveMs: 2000 })
+  expect(await readState($, 'history')).toEqual({ agents: 1, tokens: 1200, activeMs: 2000, maxTokens: 1200, maxActiveMs: 2000 })
 })
 
 test('the stored day holds new tokens, not cache reads', async ($, on) => {
@@ -74,7 +74,7 @@ test('the stored day holds new tokens, not cache reads', async ($, on) => {
   await step($, 'a1')
   await turn($, 'a1', 'end')
   await turn($, undefined, 'end')
-  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(Date.UTC(2026, 10, 5, 12)), agents: 1, tokens: 1230, activeMs: 0 }])
+  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(Date.UTC(2026, 10, 5, 12)), agents: 1, tokens: 1230, activeMs: 0, maxTokens: 1230, maxActiveMs: 0 }])
 })
 
 test('no summary when no agent ran', async ($, on) => {
@@ -90,7 +90,7 @@ test('the stored days become the totals when the session starts', async ($, on) 
   standIns(on)
   seedStore('days-v2', [{ day: localDay(0), agents: 3, tokens: 4500, activeMs: 6000 }])
   await start($)
-  expect(await readState($, 'history')).toEqual({ agents: 3, tokens: 4500, activeMs: 6000 })
+  expect(await readState($, 'history')).toEqual({ agents: 3, tokens: 4500, activeMs: 6000, maxTokens: 0, maxActiveMs: 0 })
 })
 
 test('work done between main turns is counted once: in the next summary and in the store', async ($, on) => {
@@ -110,7 +110,7 @@ test('work done between main turns is counted once: in the next summary and in t
   await turn($, undefined, 'end')
   const summary = await readState($, 'summary') as Summary | null
   expect(summary?.text).toBe('1 agent · 1.2k tok · 0s active combined · longest: "Background job" 0s active')
-  const once = [{ day: localDay(0), agents: 1, tokens: 1200, activeMs: 0 }]
+  const once = [{ day: localDay(0), agents: 1, tokens: 1200, activeMs: 0, maxTokens: 1200, maxActiveMs: 0 }]
   expect(await readStore($, 'days-v2')).toEqual(once)
   await clock.advance(SEC)
   await turn($, undefined, 'start')
@@ -139,7 +139,7 @@ test('Stop and Allow resume alone add nothing to the next summary', async ($, on
   await ui.unmount()
   await turn($, undefined, 'end')
   expect(await readState($, 'summary')).toBeNull()
-  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(0), agents: 1, tokens: 1200, activeMs: 0 }])
+  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(0), agents: 1, tokens: 1200, activeMs: 0, maxTokens: 1200, maxActiveMs: 0 }])
 })
 
 test('rows read back after a reload are not reported again; their new work is', async ($, on) => {
@@ -168,7 +168,7 @@ test('rows read back after a reload are not reported again; their new work is', 
   await turn($, 'old', 'end')
   await turn($, undefined, 'end')
   expect((await readState($, 'summary') as Summary | null)?.text).toStartWith('1 agent · 100 tok')
-  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(0), agents: 0, tokens: 100, activeMs: 0 }])
+  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(0), agents: 0, tokens: 100, activeMs: 0, maxTokens: 5100, maxActiveMs: 3000 }])
 })
 
 test('a row read back with cache reads is reported by its new tokens, so later work still counts', async ($, on) => {
@@ -192,7 +192,7 @@ test('a row read back with cache reads is reported by its new tokens, so later w
   await turn($, 'old', 'end')
   await turn($, undefined, 'end')
   expect((await readState($, 'summary') as Summary | null)?.text).toStartWith('1 agent · 100 tok')
-  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(0), agents: 0, tokens: 100, activeMs: 0 }])
+  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(0), agents: 0, tokens: 100, activeMs: 0, maxTokens: 5100, maxActiveMs: 3000 }])
 })
 
 test('the session end stores what no summary reported, and leaves the band alone', async ($, on) => {
@@ -204,26 +204,26 @@ test('the session end stores what no summary reported, and leaves the band alone
   await step($, 'bg')
   await turn($, 'bg', 'end')
   await end($)
-  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(0), agents: 1, tokens: 1200, activeMs: 0 }])
+  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(0), agents: 1, tokens: 1200, activeMs: 0, maxTokens: 1200, maxActiveMs: 0 }])
   expect(await readState($, 'summary')).toBeUndefined()
   // After a /clear the process goes on: what the end stored is not reported again.
   await turn($, undefined, 'start')
   await turn($, undefined, 'end')
   expect(await readState($, 'summary')).toBeNull()
-  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(0), agents: 1, tokens: 1200, activeMs: 0 }])
+  expect(await readStore($, 'days-v2')).toEqual([{ day: localDay(0), agents: 1, tokens: 1200, activeMs: 0, maxTokens: 1200, maxActiveMs: 0 }])
 })
 
 test('parseDays merges entries of the same day by summing', () => {
-  expect(parseDays([{ day: '2026-11-01', agents: 1, tokens: 10, activeMs: 100 }, { day: '2026-11-02', agents: 5, tokens: 5, activeMs: 5 },
-    { day: '2026-11-01', agents: 2, tokens: 20, activeMs: 200 }]))
-    .toEqual([{ day: '2026-11-01', agents: 3, tokens: 30, activeMs: 300 }, { day: '2026-11-02', agents: 5, tokens: 5, activeMs: 5 }])
+  expect(parseDays([{ day: '2026-11-01', agents: 1, tokens: 10, activeMs: 100, maxTokens: 4, maxActiveMs: 90 }, { day: '2026-11-02', agents: 5, tokens: 5, activeMs: 5 },
+    { day: '2026-11-01', agents: 2, tokens: 20, activeMs: 200, maxTokens: 6, maxActiveMs: 50 }]))
+    .toEqual([{ day: '2026-11-01', agents: 3, tokens: 30, activeMs: 300, maxTokens: 6, maxActiveMs: 90 }, { day: '2026-11-02', agents: 5, tokens: 5, activeMs: 5, maxTokens: 0, maxActiveMs: 0 }])
 })
 
 test('days dated after today are kept by addTurn and ignored by totals', () => {
-  const future = { day: '2026-11-09', agents: 9, tokens: 9, activeMs: 9 }
-  const past = { day: '2026-11-01', agents: 1, tokens: 1, activeMs: 1 }
+  const future = { day: '2026-11-09', agents: 9, tokens: 9, activeMs: 9, maxTokens: 0, maxActiveMs: 0 }
+  const past = { day: '2026-11-01', agents: 1, tokens: 1, activeMs: 1, maxTokens: 0, maxActiveMs: 0 }
   expect(addTurn([past, future], s, now).map(d => d.day)).toEqual(['2026-11-01', '2026-11-03', '2026-11-09'])
-  expect(totals([past, future], now)).toEqual({ agents: 1, tokens: 1, activeMs: 1 })
+  expect(totals([past, future], now)).toEqual({ agents: 1, tokens: 1, activeMs: 1, maxTokens: 0, maxActiveMs: 0 })
 })
 
 test('localTime moves a clock reading by the zone offset, so a day is the local day', () => {
@@ -240,7 +240,7 @@ test('the day stored, and the 30 days summed, are the local ones', async ($, on)
   const { setUsage } = standIns(on, [], { now: late })
   seedStore('days-v2', [{ day: dayOf(localTime(late - 3 * DAY)), agents: 1, tokens: 10, activeMs: 100 }])
   await start($)
-  expect(await readState($, 'history')).toEqual({ agents: 1, tokens: 10, activeMs: 100 })
+  expect(await readState($, 'history')).toEqual({ agents: 1, tokens: 10, activeMs: 100, maxTokens: 0, maxActiveMs: 0 })
   await turn($, undefined, 'start')
   await spawn($, 'a1')
   setUsage(usage)
@@ -250,7 +250,7 @@ test('the day stored, and the 30 days summed, are the local ones', async ($, on)
   await turn($, undefined, 'end')
   const days = await readStore($, 'days-v2') as { day: string }[]
   expect(days.at(-1)?.day).toBe(dayOf(localTime(late)))
-  expect(await readState($, 'history')).toEqual({ agents: 2, tokens: 1210, activeMs: 100 })
+  expect(await readState($, 'history')).toEqual({ agents: 2, tokens: 1210, activeMs: 100, maxTokens: 1200, maxActiveMs: 0 })
   // The session end stores the same day.
   await spawn($, 'bg')
   await turn($, 'bg', 'start')
@@ -258,4 +258,35 @@ test('the day stored, and the 30 days summed, are the local ones', async ($, on)
   await turn($, 'bg', 'end')
   await end($)
   expect(((await readStore($, 'days-v2')) as { day: string }[]).map(d => d.day)).toEqual([dayOf(localTime(late - 3 * DAY)), dayOf(localTime(late))])
+})
+
+test('an entry stored without the peak fields parses with 0s', () => {
+  expect(parseDays([{ day: '2026-11-01', agents: 1, tokens: 10, activeMs: 100 }])).toEqual([{ day: '2026-11-01', agents: 1, tokens: 10, activeMs: 100, maxTokens: 0, maxActiveMs: 0 }])
+  expect(parseDays([{ day: '2026-11-01', agents: 1, tokens: 10, activeMs: 100, maxTokens: 'x', maxActiveMs: -5 }])[0]).toMatchObject({ maxTokens: 0, maxActiveMs: 0 })
+})
+
+test('addTurn keeps the day maximum of one agent across turns', () => {
+  const rows = (tokens: number, activeMs: number): TurnSummary => ({ ...s, rows: [{ id: 'a', tokens, activeMs, totalTokens: tokens, totalActiveMs: activeMs }, { id: 'b', tokens: tokens / 2, activeMs: activeMs * 2, totalTokens: tokens / 2, totalActiveMs: activeMs * 2 }] })
+  const first = addTurn([], rows(900, 100), now)
+  expect(first[0]).toMatchObject({ maxTokens: 900, maxActiveMs: 200 })
+  const second = addTurn(first, rows(400, 50), now)
+  expect(second[0]).toMatchObject({ maxTokens: 900, maxActiveMs: 200 })
+  const third = addTurn(second, rows(1200, 500), now)
+  expect(third[0]).toMatchObject({ maxTokens: 1200, maxActiveMs: 1000 })
+  expect(addTurn([], s, now)[0]).toMatchObject({ maxTokens: 0, maxActiveMs: 0 })
+})
+
+test('addTurn takes the peak from the whole totals of each agent, not the turn share', () => {
+  const t: TurnSummary = { ...s, rows: [{ id: 'a', tokens: 20, activeMs: 2000, totalTokens: 30, totalActiveMs: 3000 }] }
+  expect(addTurn([], t, now)[0]).toMatchObject({ maxTokens: 30, maxActiveMs: 3000 })
+})
+
+test('totals takes the maximum over the window and sums the rest', () => {
+  const days = [
+    { day: '2026-10-01', agents: 1, tokens: 1, activeMs: 1, maxTokens: 9999, maxActiveMs: 9999 },
+    { day: '2026-11-01', agents: 1, tokens: 10, activeMs: 100, maxTokens: 7, maxActiveMs: 70 },
+    { day: '2026-11-02', agents: 2, tokens: 20, activeMs: 200, maxTokens: 12, maxActiveMs: 30 },
+    { day: '2026-11-09', agents: 1, tokens: 1, activeMs: 1, maxTokens: 8888, maxActiveMs: 8888 }
+  ]
+  expect(totals(days, now)).toEqual({ agents: 3, tokens: 30, activeMs: 300, maxTokens: 12, maxActiveMs: 70 })
 })

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fingerprint } from '../hooks/fingerprint.ts'
-import { NESTED_TOOLS, REPEAT_KEYS_MAX, activeMs, adoptReadBack, allowResume, endListed, asksPerson, endMainTurn, listDue, markStopped, newTracker, noteSpawn,
+import { NESTED_TOOLS, activeMs, adoptReadBack, allowResume, endListed, foldReadBack, asksPerson, endMainTurn, listDue, markStopped, newTracker, noteSpawn,
   newTokens, stepEnded, stepStarted, toolAsked, toolEnded, toolStarted, turnEnded, turnStarted, type Tracker } from '../hooks/tracker.ts'
 import type { AgentRow } from '../types'
 
@@ -77,15 +77,16 @@ test("Agent and Workflow calls are not the parent's time", () => {
   expect(activeMs(rowOf(t, 'a1'), 10 * MIN)).toBe(0)
 })
 
-test('repeats count per agent and exact call', () => {
+test('repeats count the same call in a row, per agent; a different call starts over', () => {
   const t = newTracker()
   spawn(t, 'a1')
   spawn(t, 'a2')
   expect(call(t, 'a1', 'c1', 0)).toBe(1)
   expect(call(t, 'a1', 'c2', 0)).toBe(2)
-  expect(call(t, 'a1', 'c3', 0)).toBe(3)
-  expect(call(t, 'a2', 'c4', 0)).toBe(1)
-  expect(call(t, 'a1', 'c5', 0, 'Bash', 'k2')).toBe(1)
+  expect(call(t, 'a2', 'c3', 0)).toBe(1)     // another agent has its own run
+  expect(call(t, 'a1', 'c4', 0, 'Bash', 'k2')).toBe(1)   // a different call ends a1's run
+  expect(call(t, 'a1', 'c5', 0, 'Bash', 'k2')).toBe(2)
+  expect(call(t, 'a1', 'c6', 0)).toBe(1)     // back to the first call: a new run
 })
 
 test('failure streak: errors add, success resets, denials leave it', () => {
@@ -153,15 +154,38 @@ test('each summary counts what changed since the last one', () => {
   spawn(t, 'a1')
   stepStarted(t, 'a1', 0)
   stepEnded(t, 'a1', use({ input_tokens: 1000 }), 1000)
-  expect(endMainTurn(t, 2000)).toEqual({ agents: 1, newAgents: 1, tokens: 1000, activeMs: 1000, longest: { id: 'a1', activeMs: 1000 } })
+  expect(endMainTurn(t, 2000)).toEqual({ agents: 1, newAgents: 1, tokens: 1000, activeMs: 1000, longest: { id: 'a1', activeMs: 1000 }, rows: [{ id: 'a1', tokens: 1000, activeMs: 1000, totalTokens: 1000, totalActiveMs: 1000 }] })
   stepStarted(t, 'a1', 3000)
   stepEnded(t, 'a1', use({ output_tokens: 500 }), 5000)
   spawn(t, 'a2', 6000)
   stepStarted(t, 'a2', 6000)
   stepEnded(t, 'a2', use({ input_tokens: 300 }), 7000)
-  expect(endMainTurn(t, 8000)).toEqual({ agents: 2, newAgents: 1, tokens: 800, activeMs: 3000, longest: { id: 'a1', activeMs: 2000 } })
+  // The rows hold only this turn's difference (a1 was reported before), longest first.
+  expect(endMainTurn(t, 8000)).toEqual({ agents: 2, newAgents: 1, tokens: 800, activeMs: 3000, longest: { id: 'a1', activeMs: 2000 },
+    rows: [{ id: 'a1', tokens: 500, activeMs: 2000, totalTokens: 1500, totalActiveMs: 3000 }, { id: 'a2', tokens: 300, activeMs: 1000, totalTokens: 300, totalActiveMs: 1000 }] })
   expect(endMainTurn(t, 9000)).toBeNull()
   expect(endMainTurn(t, 11_000)).toBeNull()
+})
+
+test('a summary row also carries the agent whole reported total', () => {
+  const t = newTracker()
+  spawn(t, 'a1')
+  stepStarted(t, 'a1', 0)
+  stepEnded(t, 'a1', use({ input_tokens: 10 }), 1000)
+  endMainTurn(t, 1000)
+  stepStarted(t, 'a1', 2000)
+  stepEnded(t, 'a1', use({ input_tokens: 20 }), 4000)
+  expect(endMainTurn(t, 4000)?.rows[0]).toEqual({ id: 'a1', tokens: 20, activeMs: 2000, totalTokens: 30, totalActiveMs: 3000 })
+})
+
+test('a fold keeps the last tool of the copy when this row has none', () => {
+  const t = newTracker()
+  spawn(t, 'a1')
+  const copy = { ...t.agents['a1']!, lastTool: 'Bash' }
+  foldReadBack(t, t.agents['a1']!, copy)
+  expect(t.agents['a1']?.lastTool).toBe('Bash')
+  foldReadBack(t, t.agents['a1']!, { ...copy, lastTool: 'Read' })
+  expect(t.agents['a1']?.lastTool).toBe('Bash')
 })
 
 test('work done between two summaries is in the next one, whenever it was done', () => {
@@ -175,7 +199,7 @@ test('work done between two summaries is in the next one, whenever it was done',
   stepStarted(t, 'bg', 50_000)
   stepEnded(t, 'bg', use({ output_tokens: 5000 }), 60_000)
   turnEnded(t, 'bg', 'answer', 60_000)
-  expect(endMainTurn(t, 900_000)).toEqual({ agents: 1, newAgents: 1, tokens: 5000, activeMs: 10_000, longest: { id: 'bg', activeMs: 10_000 } })
+  expect(endMainTurn(t, 900_000)).toEqual({ agents: 1, newAgents: 1, tokens: 5000, activeMs: 10_000, longest: { id: 'bg', activeMs: 10_000 }, rows: [{ id: 'bg', tokens: 5000, activeMs: 10_000, totalTokens: 5000, totalActiveMs: 10_000 }] })
   expect(endMainTurn(t, 901_000)).toBeNull()
 })
 
@@ -402,11 +426,12 @@ test('an interval still open at a summary counts up to it, and the rest goes to 
   spawn(t, 'a1')
   spawn(t, 'a2')
   stepStarted(t, 'a1', 1000)
-  expect(endMainTurn(t, 2000)).toEqual({ agents: 1, newAgents: 1, tokens: 0, activeMs: 1000, longest: { id: 'a1', activeMs: 1000 } })
+  expect(endMainTurn(t, 2000)).toEqual({ agents: 1, newAgents: 1, tokens: 0, activeMs: 1000, longest: { id: 'a1', activeMs: 1000 }, rows: [{ id: 'a1', tokens: 0, activeMs: 1000, totalTokens: 0, totalActiveMs: 1000 }] })
   stepEnded(t, 'a1', use({ output_tokens: 10 }), 5000)
   stepStarted(t, 'a2', 2500)
   stepEnded(t, 'a2', use({ input_tokens: 20 }), 7500)
-  expect(endMainTurn(t, 8000)).toEqual({ agents: 2, newAgents: 1, tokens: 30, activeMs: 8000, longest: { id: 'a2', activeMs: 5000 } })
+  expect(endMainTurn(t, 8000)).toEqual({ agents: 2, newAgents: 1, tokens: 30, activeMs: 8000, longest: { id: 'a2', activeMs: 5000 },
+    rows: [{ id: 'a2', tokens: 20, activeMs: 5000, totalTokens: 20, totalActiveMs: 5000 }, { id: 'a1', tokens: 10, activeMs: 3000, totalTokens: 10, totalActiveMs: 4000 }] })
   expect(activeMs(rowOf(t, 'a1'), 8000)).toBe(4000)
 })
 
@@ -417,7 +442,7 @@ test('a row with no new tokens or time is left out: a spawn alone, Stop, Allow r
   stepStarted(t, 'a1', 3000)
   stepEnded(t, 'a1', use({ input_tokens: 5 }), 4000)
   // Its first work makes it a new agent, though it started before the last summary.
-  expect(endMainTurn(t, 4000)).toEqual({ agents: 1, newAgents: 1, tokens: 5, activeMs: 1000, longest: { id: 'a1', activeMs: 1000 } })
+  expect(endMainTurn(t, 4000)).toEqual({ agents: 1, newAgents: 1, tokens: 5, activeMs: 1000, longest: { id: 'a1', activeMs: 1000 }, rows: [{ id: 'a1', tokens: 5, activeMs: 1000, totalTokens: 5, totalActiveMs: 1000 }] })
   markStopped(t, 'a1', 5000)
   allowResume(t, 'a1', 6000)
   expect(endMainTurn(t, 7000)).toBeNull()
@@ -430,10 +455,10 @@ test('a summary never takes back time a stale clock read closed short, and never
   expect(endMainTurn(t, 5000)).toMatchObject({ activeMs: 4000 })
   // The step's end was read before the summary's time: the row now holds less than was reported.
   stepEnded(t, 'a1', use({ output_tokens: 7 }), 4000)
-  expect(endMainTurn(t, 6000)).toEqual({ agents: 1, newAgents: 0, tokens: 7, activeMs: 0, longest: { id: 'a1', activeMs: 0 } })
+  expect(endMainTurn(t, 6000)).toEqual({ agents: 1, newAgents: 0, tokens: 7, activeMs: 0, longest: { id: 'a1', activeMs: 0 }, rows: [{ id: 'a1', tokens: 7, activeMs: 0, totalTokens: 7, totalActiveMs: 4000 }] })
   stepStarted(t, 'a1', 10_000)
   stepEnded(t, 'a1', null, 12_000)
-  expect(endMainTurn(t, 13_000)).toEqual({ agents: 1, newAgents: 0, tokens: 0, activeMs: 1000, longest: { id: 'a1', activeMs: 1000 } })
+  expect(endMainTurn(t, 13_000)).toEqual({ agents: 1, newAgents: 0, tokens: 0, activeMs: 1000, longest: { id: 'a1', activeMs: 1000 }, rows: [{ id: 'a1', tokens: 0, activeMs: 1000, totalTokens: 7, totalActiveMs: 5000 }] })
 })
 
 test('asksPerson: only bypassPermissions, auto and dontAsk skip the person', () => {
@@ -494,7 +519,7 @@ test('a second start of the same call is ignored', () => {
   spawn(t, 'a1')
   expect(call(t, 'a1', 'c1', 0)).toBe(1)
   expect(call(t, 'a1', 'c1', 1000)).toBe(1)
-  expect(t.repeats['a1']?.get('k')).toBe(1)
+  expect(t.repeats['a1']).toEqual({ key: 'k', count: 1 })
   expect(rowOf(t, 'a1').openTools).toBe(1)
   expect(rowOf(t, 'a1').busy).toBe(1)
   toolEnded(t, 'c1', 'ok', 3000)
@@ -509,24 +534,29 @@ test('the agent list is due at first, after the interval, and at once when the c
   expect(listDue(5000, 4999, 10_000)).toBe(true)
 })
 
-test("an agent's repeat counts keep the calls used last, up to the cap", () => {
+test('a run of the same call survives a turn boundary', () => {
   const t = newTracker()
-  let n = 0
-  const call = (key: string): number => {
-    n += 1
-    const count = toolStarted(t, { agentId: 'a1', toolUseId: `u${n}`, tool: 'Bash', key }, 0)
-    toolEnded(t, `u${n}`, 'ok', 0)
-    return count
-  }
-  // An all-digit key: an object would list it first whatever its use, a Map keeps the order of use.
-  expect(call('12345678')).toBe(1)
-  for (let i = 0; i < REPEAT_KEYS_MAX - 1; i += 1) call(`k${i}`)
-  expect(call('12345678')).toBe(2)
-  call('one-more')   // over the cap: the key unused the longest (k0) goes
-  expect(t.repeats['a1']?.size).toBe(REPEAT_KEYS_MAX)
-  expect(call('12345678')).toBe(3)
-  expect(call('k0')).toBe(1)
-  expect(call('k1')).toBe(1)   // k0's return pushed out k1, the next oldest
+  spawn(t, 'a1')
+  expect(call(t, 'a1', 'c1', 0)).toBe(1)
+  turnEnded(t, 'a1', 'answer', 0)
+  turnStarted(t, 'a1', 0)
+  expect(call(t, 'a1', 'c2', 0)).toBe(2)
+})
+
+test('Allow resume pressed before the read-back is not undone by the stored Stop', () => {
+  const t = newTracker()
+  spawn(t, 'a1')
+  markStopped(t, 'a1', 0)
+  allowResume(t, 'a1', 0)
+  const copy = { ...t.agents['a1']!, isStopped: true, status: 'stopped' as const, tokens: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 } }
+  foldReadBack(t, t.agents['a1']!, copy)
+  expect(t.agents['a1']?.isStopped).toBe(false)
+  // A Stop pressed after the resume holds again.
+  markStopped(t, 'a1', 0)
+  allowResume(t, 'a1', 0)
+  markStopped(t, 'a1', 0)
+  foldReadBack(t, t.agents['a1']!, { ...copy, isStopped: false })
+  expect(t.agents['a1']?.isStopped).toBe(true)
 })
 
 test('resuming a stopped agent keeps it stopped', () => {
@@ -640,4 +670,14 @@ test('endListed leaves a resumed row alone until its turn starts (a row whose tu
   expect(rowOf(t, 'tm').status).toBe('running')
   turnStarted(t, 'tm', 10)
   expect(endListed(t, [{ id: 'tm', status: 'completed' }], turnsOf(t), 11)).toBe(true)
+})
+
+test('a tool start records the tool as the last one, cleaned', () => {
+  const t = newTracker()
+  spawn(t, 'a1')
+  expect(rowOf(t, 'a1').lastTool).toBeUndefined()
+  call(t, 'a1', 'c1', 0, 'Bash')
+  expect(rowOf(t, 'a1').lastTool).toBe('Bash')
+  call(t, 'a1', 'c2', 1, ' Read\n‮ ')
+  expect(rowOf(t, 'a1').lastTool).toBe('Read')
 })

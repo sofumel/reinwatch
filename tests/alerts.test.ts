@@ -81,7 +81,7 @@ test('repeat fires at the configured count', () => {
   expect(fired.length).toBe(1)
   expect(fired[0]?.key).toBe('repeat:a1')
   expect(fired[0]?.kind).toBe('repeat')
-  expect(fired[0]?.text).toBe('"Fix tests" made the same Bash call 5 times')
+  expect(fired[0]?.text).toBe('"Fix tests" made the same Bash call 5 times in a row')
   expect(checkAgent(t, 'a1', s, 0, { tool: 'Bash', count: 6 })).toEqual([])
 })
 
@@ -153,6 +153,24 @@ test('a new burst inside one window of the last warning warns again once the cou
   for (let i = 1; i <= 8; i++) again.push(...start(`b${i}`, 122 * SEC))
   expect(again.map(a => a.key)).toEqual([`burst:${122 * SEC}`])
   expect(again[0]?.text).toBe('10 agents started within 2m')
+})
+
+test('burst keys stay unique per warning but are not kept in fired', () => {
+  const t = newTracker()
+  const burst = (prefix: string, at: number) => {
+    const out = []
+    for (let i = 0; i < 10; i++) {
+      spawn(t, `${prefix}${i}`, at + i * SEC)
+      out.push(...checkSpawn(t, undefined, s, at + i * SEC))
+    }
+    return out
+  }
+  const first = burst('a', 0)
+  const second = burst('b', 200 * SEC)
+  expect(first.length).toBe(1)
+  expect(second.length).toBe(1)
+  expect(first[0]?.key).not.toBe(second[0]?.key)
+  expect(Object.keys(t.fired).filter(k => k.startsWith('burst:'))).toEqual([])
 })
 
 test('a workflow run fires once at the count', () => {
@@ -256,9 +274,25 @@ test("a warning's text is one plain line, whatever the tool or the run is called
   const t = newTracker()
   spawn(t, 'a1')
   const few = { ...s, repeatCount: 2, burstCount: 2 }
-  expect(checkAgent(t, 'a1', few, 0, { tool: 'Ba\nsh\u001b', count: 2 }).map(a => a.text)).toEqual(['"Fix tests" made the same Ba sh call 2 times'])
+  expect(checkAgent(t, 'a1', few, 0, { tool: 'Ba\nsh\u001b', count: 2 }).map(a => a.text)).toEqual(['"Fix tests" made the same Ba sh call 2 times in a row'])
   t.runs['r\u001b1'] = 2
   const run = checkSpawn(t, 'r\u001b1', few, 0).find(a => a.kind === 'run')
   expect(run?.text).toBe('Workflow run r 1 has started 2 agents')
   expect(run?.key).toBe('run:r\u001b1')   // the key is the id as it came; only the text is cleaned
+})
+
+test('a muted kind raises nothing and is not remembered', () => {
+  const t = newTracker()
+  spawn(t, 'a1')
+  const m = { ...s, muted: new Set<'repeat'>(['repeat']) }
+  expect(checkAgent(t, 'a1', m, 0, { tool: 'Bash', count: 5 })).toEqual([])
+  expect(t.fired['repeat:a1']).toBeUndefined()
+})
+
+test('a muted burst and a muted run raise nothing', () => {
+  const t = newTracker()
+  const m = { ...s, muted: new Set<'burst' | 'run'>(['burst', 'run']), burstCount: 2 }
+  for (let i = 0; i < 3; i++) spawn(t, `a${i}`, i * SEC, { runId: 'r1' })
+  expect(checkSpawn(t, 'r1', m, 3 * SEC)).toEqual([])
+  expect(t.fired['run:r1']).toBeUndefined()
 })
